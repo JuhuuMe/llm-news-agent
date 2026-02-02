@@ -1,12 +1,15 @@
-"""Core agent — fetches news, deduplicates, and produces analysis via LLM."""
+"""Core agent — fetches news, deduplicates, builds knowledge graph, and produces analysis via LLM."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 from datetime import datetime
+from pathlib import Path
 
 from news_agent.config import Settings
+from news_agent.extraction import extract_from_article
+from news_agent.graph import GraphStore
 from news_agent.llm import LLM, extract_json
 from news_agent.models import (
     Article,
@@ -17,6 +20,7 @@ from news_agent.models import (
     Urgency,
     UserInterests,
 )
+from news_agent.qa import answer_question
 from news_agent.sources.alphavantage import AlphaVantageSource
 from news_agent.sources.base import NewsSource
 from news_agent.sources.finnhub import FinnhubSource
@@ -26,13 +30,14 @@ logger = logging.getLogger(__name__)
 
 
 class MarketNewsAgent:
-    """Orchestrates news fetching and LLM-based analysis."""
+    """Orchestrates news fetching, graph building, and LLM-based analysis."""
 
     def __init__(self, settings: Settings, interests: UserInterests) -> None:
         self.settings = settings
         self.interests = interests
         self.llm = LLM(settings)
         self.sources = self._build_sources()
+        self.graph = GraphStore(Path("news_graph.db"))
         # Track already-seen article URLs to avoid re-alerting in watch mode
         self._seen_urls: set[str] = set()
 
@@ -81,6 +86,33 @@ class MarketNewsAgent:
             reverse=True,
         )
         return articles
+
+    async def ingest_to_graph(self, articles: list[Article]) -> int:
+        """Run entity extraction on articles and ingest into the knowledge graph.
+
+        Returns the number of articles successfully ingested.
+        """
+        # Prune stale data first
+        self.graph.prune_older_than_days(7)
+
+        ingested = 0
+        for article in articles:
+            try:
+                result = await extract_from_article(self.llm, article)
+                self.graph.ingest_extraction(
+                    article, result.entities, result.events, result.relationships
+                )
+                ingested += 1
+            except Exception as exc:
+                logger.warning("Graph ingest failed for '%s': %s", article.title[:60], exc)
+        return ingested
+
+    # ------------------------------------------------------------------
+    # Q&A
+    # ------------------------------------------------------------------
+    async def ask(self, question: str) -> str:
+        """Answer a user question using the knowledge graph."""
+        return await answer_question(question, self.llm, self.graph)
 
     # ------------------------------------------------------------------
     # Daily overview

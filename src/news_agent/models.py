@@ -71,3 +71,65 @@ class BreakingAlert(BaseModel):
 
     digest: NewsDigest
     reason: str = ""  # why this is breaking / urgent
+
+
+# ---------------------------------------------------------------------------
+# Graph RAG models
+# ---------------------------------------------------------------------------
+
+
+class EntityType(str, Enum):
+    TICKER = "ticker"
+    COMMODITY = "commodity"
+    INDEX = "index"
+    INSTITUTION = "institution"
+    PERSON = "person"
+    SECTOR = "sector"
+    COUNTRY = "country"
+    CURRENCY = "currency"
+
+
+class EventType(str, Enum):
+    RATE_DECISION = "rate_decision"
+    EARNINGS = "earnings"
+    GEOPOLITICAL = "geopolitical"
+    REGULATORY = "regulatory"
+    DATA_RELEASE = "data_release"
+    IPO = "ipo"
+    MERGER = "merger"
+    COMMODITY_MOVE = "commodity_move"
+    OTHER = "other"
+
+
+class Entity(BaseModel):
+    """A named entity in the knowledge graph."""
+
+    name: str
+    entity_type: EntityType
+    aliases: list[str] = Field(default_factory=list)
+
+
+class Event(BaseModel):
+    """A market event extracted from articles."""
+
+    description: str
+    event_type: EventType = EventType.OTHER
+    timestamp: datetime | None = None
+
+
+class Relationship(BaseModel):
+    """An edge in the knowledge graph."""
+
+    source: str  # entity or event name
+    target: str  # entity or event name
+    relation: str  # MENTIONS, REPORTS_ON, AFFECTS, RELATED_TO, CAUSED_BY
+    direction: str = ""  # bullish / bearish / neutral (for AFFECTS edges)
+    weight: float = 1.0
+
+
+class ExtractionResult(BaseModel):
+    """Structured output from the LLM entity/relationship extraction step."""
+
+    entities: list[Entity] = Field(default_factory=list)
+    events: list[Event] = Field(default_factory=list)
+    relationships: list[Relationship] = Field(default_factory=list)

@@ -9,9 +9,9 @@ import logging
 import sys
 
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
-from rich.table import Table
 from rich.text import Text
 
 from news_agent.agent import MarketNewsAgent
@@ -130,7 +130,7 @@ def render_alert(alert: BreakingAlert) -> None:
     console.print(
         Panel(
             content,
-            title="🚨 BREAKING",
+            title="BREAKING",
             border_style="bold red",
         )
     )
@@ -138,11 +138,45 @@ def render_alert(alert: BreakingAlert) -> None:
         console.print(f"  [dim]→ {sa.url}[/dim]")
 
 
+def render_graph_stats(agent: MarketNewsAgent) -> None:
+    """Show knowledge graph statistics."""
+    stats = agent.graph.stats()
+    console.print(
+        f"[dim]Knowledge graph: {stats['articles']} articles, "
+        f"{stats['entities']} entities, {stats['events']} events, "
+        f"{stats['edges']} edges[/dim]"
+    )
+
+
+# ------------------------------------------------------------------
+# Commands
+# ------------------------------------------------------------------
+
+
 async def cmd_overview(agent: MarketNewsAgent) -> None:
     """Run the daily overview command."""
     with console.status("[bold blue]Fetching news from all sources…"):
+        articles = await agent.fetch_all()
+
+    if not articles:
+        console.print("[yellow]No articles found for your interests.[/yellow]")
+        return
+
+    console.print(f"[dim]Fetched {len(articles)} articles. Building knowledge graph…[/dim]")
+    with console.status("[bold blue]Extracting entities & relationships…"):
+        ingested = await agent.ingest_to_graph(articles)
+    console.print(f"[dim]Ingested {ingested} articles into graph.[/dim]")
+    render_graph_stats(agent)
+
+    with console.status("[bold blue]Generating overview…"):
         overview = await agent.daily_overview()
     render_overview(overview)
+
+    # Offer to ask follow-up questions
+    console.print()
+    console.print("[bold]You can now ask questions about today's news.[/bold]")
+    console.print("[dim]Type 'quit' or 'q' to exit.[/dim]")
+    await _qa_loop(agent)
 
 
 async def cmd_watch(agent: MarketNewsAgent) -> None:
@@ -157,9 +191,13 @@ async def cmd_watch(agent: MarketNewsAgent) -> None:
         )
     )
 
-    # Do an initial scan
+    # Do an initial scan with graph ingest
     with console.status("[bold green]Initial scan…"):
+        articles = await agent.fetch_all()
+        if articles:
+            await agent.ingest_to_graph(articles)
         alerts = await agent.check_breaking()
+    render_graph_stats(agent)
     if alerts:
         for alert in alerts:
             render_alert(alert)
@@ -170,6 +208,9 @@ async def cmd_watch(agent: MarketNewsAgent) -> None:
         await asyncio.sleep(interval)
         try:
             with console.status("[dim]Checking for new articles…[/dim]"):
+                articles = await agent.fetch_all()
+                if articles:
+                    await agent.ingest_to_graph(articles)
                 alerts = await agent.check_breaking()
             if alerts:
                 for alert in alerts:
@@ -182,16 +223,81 @@ async def cmd_watch(agent: MarketNewsAgent) -> None:
             console.print(f"[red]Error during poll: {exc}[/red]")
 
 
+async def cmd_ask(agent: MarketNewsAgent) -> None:
+    """Interactive Q&A mode — fetch news, build graph, then answer questions."""
+    with console.status("[bold blue]Fetching news and building knowledge graph…"):
+        articles = await agent.fetch_all()
+        if articles:
+            ingested = await agent.ingest_to_graph(articles)
+            console.print(f"[dim]Ingested {ingested} articles into graph.[/dim]")
+    render_graph_stats(agent)
+    console.print()
+    console.print(
+        Panel(
+            "[bold]Ask questions about financial markets[/bold]\n"
+            "The agent uses a knowledge graph built from recent news to answer.\n"
+            "Answers include consensus views and outlier perspectives.\n\n"
+            'Examples: "Why did oil prices move today?"\n'
+            '          "What is the outlook for tech stocks?"\n'
+            '          "How are crypto markets reacting to Fed policy?"',
+            title="Q&A Mode",
+            border_style="cyan",
+        )
+    )
+    await _qa_loop(agent)
+
+
+async def _qa_loop(agent: MarketNewsAgent) -> None:
+    """Shared interactive Q&A loop."""
+    while True:
+        console.print()
+        try:
+            question = Prompt.ask("[bold cyan]Question[/bold cyan]")
+        except (EOFError, KeyboardInterrupt):
+            break
+
+        if question.strip().lower() in ("quit", "q", "exit", ""):
+            break
+
+        if question.strip().lower() == "refresh":
+            with console.status("[bold blue]Refreshing news and graph…"):
+                articles = await agent.fetch_all()
+                if articles:
+                    ingested = await agent.ingest_to_graph(articles)
+                    console.print(f"[dim]Ingested {ingested} new articles.[/dim]")
+            render_graph_stats(agent)
+            continue
+
+        if question.strip().lower() == "stats":
+            render_graph_stats(agent)
+            continue
+
+        with console.status("[bold cyan]Thinking…"):
+            answer = await agent.ask(question)
+
+        console.print()
+        console.print(Panel(Markdown(answer), title="Answer", border_style="cyan"))
+
+
+# ------------------------------------------------------------------
+# Entry point
+# ------------------------------------------------------------------
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="LLM-powered financial market news agent",
     )
     parser.add_argument(
         "mode",
-        choices=["overview", "watch"],
+        choices=["overview", "watch", "ask"],
         nargs="?",
         default="overview",
-        help="'overview' for daily summary, 'watch' for continuous breaking-news alerts",
+        help=(
+            "'overview' for daily summary (then Q&A), "
+            "'watch' for continuous breaking-news alerts, "
+            "'ask' for interactive Q&A"
+        ),
     )
     parser.add_argument(
         "--topics",
@@ -258,13 +364,15 @@ def main() -> None:
     console.print(f"[dim]Topics:  {', '.join(interests.topics)}[/dim]")
     console.print(f"[dim]Tickers: {', '.join(interests.tickers) or '(none)'}[/dim]")
     console.print(f"[dim]Model:   {settings.hf_model} ({settings.llm_backend})[/dim]")
-    console.print(f"[dim]Sources: {', '.join(s.name for s in MarketNewsAgent(settings, interests).sources)}[/dim]")
 
     agent = MarketNewsAgent(settings, interests)
+    console.print(f"[dim]Sources: {', '.join(s.name for s in agent.sources)}[/dim]")
 
     try:
         if args.mode == "watch":
             asyncio.run(cmd_watch(agent))
+        elif args.mode == "ask":
+            asyncio.run(cmd_ask(agent))
         else:
             asyncio.run(cmd_overview(agent))
     except KeyboardInterrupt:
