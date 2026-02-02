@@ -13,8 +13,8 @@ Every interaction follows three distinct phases:
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │  PHASE 1: DATA                                                   │
-│  Fetch news from 3 APIs → deduplicate → extract entities/events  │
-│  → build knowledge graph (SQLite)                                │
+│  Fetch news from RSS/Reddit/APIs → deduplicate → extract         │
+│  entities/events → build knowledge graph (SQLite)                │
 │                                                                  │
 │  PHASE 2: AGENTIC AI                                             │
 │  Parse question → traverse graph for context → ReAct tool loop   │
@@ -174,16 +174,29 @@ Phase 3/3 — REPORT
 
 Commands in Q&A: `refresh` (re-fetch news), `stats` (graph info), `quit` (exit).
 
-## Knowledge Graph
+## Knowledge Graph with LSTM-Style Memory
 
-The agent builds a graph from news articles:
+The agent builds a persistent knowledge graph from news articles:
 
 - **Nodes**: Articles, Entities (tickers, commodities, institutions, indices, currencies), Events
 - **Edges**: MENTIONS, REPORTS_ON, AFFECTS (with bullish/bearish), RELATED_TO, CAUSED_BY
 
 This enables causal reasoning: "OPEC cut → oil supply down → oil price up → energy stocks up" rather than just keyword matching.
 
-Stored in SQLite (`news_graph.db`), auto-prunes data older than 7 days.
+### Intelligent Memory Management
+
+Instead of a blunt TTL (e.g. "delete after 7 days"), the graph uses an **LSTM-inspired memory model**. Every node carries a `relevance` score (0.0–1.0) managed by four gates:
+
+| Gate | Mechanism | Effect |
+|------|-----------|--------|
+| **Forget** | `relevance *= 0.85` per cycle | Everything slowly fades |
+| **Input** | `+0.3` on re-reference, `+0.1` on user query | Referenced nodes stay alive |
+| **Structural** | `+0.02 * log(1 + edges)` | Highly-connected nodes resist decay |
+| **Output** | Prune if `relevance < 0.05` | Dead nodes are removed |
+
+**In practice:** "The Fed" stays near 1.0 because every macro article re-references it. A one-off earnings beat for a minor stock decays and gets pruned in ~18 cycles. When you ask about "oil", all oil-related entities get a relevance boost — your interest is a signal.
+
+Stored in SQLite (`news_graph.db`).
 
 ## Using a Local Model
 
@@ -206,7 +219,7 @@ llm-news-agent/
 │   ├── llm.py                      # HF Inference API / local model wrapper
 │   ├── models.py                   # Pydantic data models
 │   ├── config.py                   # Settings from .env
-│   ├── graph.py                    # SQLite-backed knowledge graph
+│   ├── graph.py                    # SQLite knowledge graph + LSTM memory
 │   ├── extraction.py               # LLM entity/relationship extraction
 │   ├── qa.py                       # Q&A pipeline + ReAct tool loop
 │   ├── tools.py                    # Live data lookup tools
@@ -224,12 +237,28 @@ llm-news-agent/
 └── README.md
 ```
 
-## Next Steps (Beyond POC)
+## Why Not Just Use ChatGPT?
 
-- **Webhook output** — Slack, Telegram, email alerts for breaking news
-- **Larger models** — 7B/13B or API models (Claude, GPT-4) for deeper analysis
-- **Historical backtesting** — compare predicted vs actual market impact
+A long chat with web access can answer one-shot market questions. This tool exists for what a chat session cannot do:
+
+| Capability | ChatGPT session | This agent |
+|-----------|----------------|------------|
+| **Persistent knowledge** | Resets every conversation | Graph carries forward across sessions |
+| **Automated monitoring** | You must ask | Watch mode runs unattended, alerts on breaking events |
+| **Structured multi-source** | Single web search | Parallel fetch from RSS/Reddit/APIs, dedup, scored |
+| **Temporal memory** | No memory of past context | LSTM-gated relevance — trends persist, noise decays |
+| **Programmatic** | Manual interaction | Cron-schedulable, API-extensible, webhook-ready |
+
+## Roadmap
+
+### Near-term
+1. **Portfolio tracking** — add your stocks/interests, agent tracks them across news cycles and flags relevant moves
+2. **Source quality rating** — rate and weight sources by accuracy over time; reliable sources rank higher in analysis
+3. **Automated daily delivery + alerts** — scheduled briefing push (email/Slack/Telegram) plus real-time breaking alerts without needing to ask
+
+### Future
+- **Larger models** — 7B/13B or API models (Claude, GPT-4) for deeper reasoning
 - **Web dashboard** — FastAPI + HTMX browser UI
 - **Vector hybrid** — embeddings alongside graph traversal for better recall
-- **Scheduled runs** — cron/systemd for automated daily reports
-- **More sources** — RSS feeds, Reddit sentiment, SEC EDGAR filings
+- **SEC EDGAR filings** — structured financial data source
+- **Historical backtesting** — compare predicted vs actual market impact
