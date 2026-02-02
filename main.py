@@ -47,7 +47,7 @@ def collect_interests() -> UserInterests:
 
     topics_raw = Prompt.ask(
         "Topics of interest (comma-separated)",
-        default="stock market, crypto, commodities, central banks, tech earnings",
+        default="stock market, inflation, oil, S&P 500, central banks, politics, elections, macro economy",
     )
     topics = [t.strip() for t in topics_raw.split(",") if t.strip()]
 
@@ -359,7 +359,7 @@ def main() -> None:
         topics = (
             [t.strip() for t in args.topics.split(",")]
             if args.topics
-            else ["stock market", "crypto", "commodities", "central banks"]
+            else ["stock market", "inflation", "oil", "S&P 500", "central banks", "politics", "elections"]
         )
         tickers = (
             [t.strip().upper() for t in args.tickers.split(",")]

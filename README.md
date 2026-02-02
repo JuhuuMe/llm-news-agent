@@ -48,15 +48,19 @@ cp .env.example .env
 # Edit .env and add your keys
 ```
 
-You need **at least one** news source key and a **Hugging Face token**:
+You need a **Hugging Face token**. News sources work out of the box — RSS and Reddit require no keys:
 
-| Service | Free Tier | What it provides | Sign Up |
-|---------|-----------|-----------------|---------|
-| NewsAPI.org | 100 req/day | Broad news from 80k+ sources | https://newsapi.org/register |
-| Finnhub | 60 req/min | Financial news + stock/crypto quotes | https://finnhub.io/register |
-| Alpha Vantage | 25 req/day | News sentiment + quotes + forex | https://www.alphavantage.co/support/#api-key |
-| FRED | Unlimited | Economic indicators (CPI, GDP, rates) | https://fred.stlouisfed.org/docs/api/api_key.html |
-| Hugging Face | Free inference API | LLM (Llama-3.2-3B) | https://huggingface.co/settings/tokens |
+| Source | Auth | What it provides |
+|--------|------|-----------------|
+| **RSS feeds** (Reuters, AP, CNBC, BBC, NPR, Guardian) | None — free, no limits | Macro, politics, commodities, central banks |
+| **Reddit** (r/economics, r/wallstreetbets, r/geopolitics) | None — free | Retail sentiment, macro discussion |
+| NewsAPI.org | API key (100 req/day free) | 80k+ broad news sources |
+| Finnhub | API key (60 req/min free) | Financial news + stock/crypto quotes |
+| Alpha Vantage | API key (25 req/day free) | News sentiment + quotes + forex |
+| FRED | API key (unlimited, free) | Economic indicators (CPI, GDP, rates) |
+| **Hugging Face** | Token (free) | LLM (Llama-3.2-3B) |
+
+**Minimum setup**: just `HF_TOKEN` — RSS and Reddit provide news with zero API keys.
 
 ### 3. Run
 
@@ -81,6 +85,8 @@ python main.py overview --non-interactive
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `ENABLE_RSS` | `true` | RSS feeds (Reuters, AP, CNBC, BBC, NPR) |
+| `ENABLE_REDDIT` | `true` | Reddit (r/economics, r/wallstreetbets, etc.) |
 | `NEWSAPI_KEY` | — | NewsAPI.org API key |
 | `FINNHUB_KEY` | — | Finnhub API key |
 | `ALPHAVANTAGE_KEY` | — | Alpha Vantage API key |
@@ -206,6 +212,8 @@ llm-news-agent/
 │   ├── tools.py                    # Live data lookup tools
 │   └── sources/
 │       ├── base.py                 # Abstract news source interface
+│       ├── rss.py                  # RSS feeds (Reuters, AP, CNBC, BBC, NPR)
+│       ├── reddit.py               # Reddit (public JSON API, no auth)
 │       ├── newsapi.py              # NewsAPI.org adapter
 │       ├── finnhub.py              # Finnhub adapter
 │       └── alphavantage.py         # Alpha Vantage adapter

@@ -120,13 +120,30 @@ main.py
 - **Watch mode**: Polls every 5 minutes (configurable)
 - **Graph rebuild**: `refresh` command in Q&A mode re-fetches and re-ingests
 
+## News Sources
+
+| Source | Auth | Implementation |
+|--------|------|---------------|
+| **RSS** (Reuters, AP, CNBC, BBC, NPR, Guardian) | None | `sources/rss.py` — stdlib `xml.etree` parser, no dependencies |
+| **Reddit** (r/economics, r/wallstreetbets, r/geopolitics) | None | `sources/reddit.py` — public JSON API (`/r/{sub}/hot.json`) |
+| **NewsAPI.org** | API key | `sources/newsapi.py` — `/v2/everything` endpoint |
+| **Finnhub** | API key | `sources/finnhub.py` — `/news` + `/company-news` |
+| **Alpha Vantage** | API key | `sources/alphavantage.py` — `NEWS_SENTIMENT` function |
+
+RSS and Reddit are enabled by default (`ENABLE_RSS=true`, `ENABLE_REDDIT=true`).
+They provide full macro/political/financial coverage with no setup.
+
+RSS feeds are topic-mapped: user topics like "oil", "politics", "inflation" resolve to
+specific feed categories (commodities_energy, politics_elections, central_banks_inflation).
+
+Reddit has a minimum quality filter (score >= 10 upvotes) to cut noise.
+
 ## Adding a New News Source
 
 1. Create `src/news_agent/sources/newsource.py`
 2. Implement `NewsSource` ABC (one method: `async fetch(query, max_results) -> list[Article]`)
-3. Add API key to `config.py` Settings class
+3. For keyed sources: add API key to `config.py` Settings class + `.env.example`
 4. Wire up in `agent.py → _build_sources()`
-5. Add key to `.env.example`
 
 ## Adding a New Tool
 

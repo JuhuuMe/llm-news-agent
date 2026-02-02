@@ -25,6 +25,8 @@ from news_agent.sources.alphavantage import AlphaVantageSource
 from news_agent.sources.base import NewsSource
 from news_agent.sources.finnhub import FinnhubSource
 from news_agent.sources.newsapi import NewsAPISource
+from news_agent.sources.reddit import RedditSource
+from news_agent.sources.rss import RSSSource
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,12 @@ class MarketNewsAgent:
 
     def _build_sources(self) -> list[NewsSource]:
         sources: list[NewsSource] = []
+        # Free sources (no API key needed)
+        if self.settings.enable_rss:
+            sources.append(RSSSource())
+        if self.settings.enable_reddit:
+            sources.append(RedditSource())
+        # API-key sources
         if self.settings.newsapi_key:
             sources.append(NewsAPISource(self.settings.newsapi_key))
         if self.settings.finnhub_key:

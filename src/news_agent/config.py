@@ -21,12 +21,22 @@ class Settings(BaseSettings):
     hf_model: str = "meta-llama/Llama-3.2-3B-Instruct"
     llm_backend: str = "api"  # "api" or "local"
 
+    # Free sources (no key required — enabled by default)
+    enable_rss: bool = True
+    enable_reddit: bool = True
+
     # Agent behaviour
     watch_interval_seconds: int = 300  # 5 min between polls in watch mode
 
     @property
     def has_any_news_source(self) -> bool:
-        return any([self.newsapi_key, self.finnhub_key, self.alphavantage_key])
+        return any([
+            self.newsapi_key,
+            self.finnhub_key,
+            self.alphavantage_key,
+            self.enable_rss,
+            self.enable_reddit,
+        ])
 
 
 def load_settings() -> Settings:

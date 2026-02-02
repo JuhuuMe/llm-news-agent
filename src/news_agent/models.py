@@ -33,7 +33,10 @@ class UserInterests(BaseModel):
     """What the user cares about."""
 
     topics: list[str] = Field(
-        default_factory=lambda: ["stock market", "crypto", "commodities", "central banks"]
+        default_factory=lambda: [
+            "stock market", "inflation", "oil", "S&P 500",
+            "central banks", "politics", "elections", "macro economy",
+        ]
     )
     tickers: list[str] = Field(default_factory=list)  # e.g. ["AAPL", "TSLA", "BTC"]
     regions: list[str] = Field(default_factory=lambda: ["US", "EU"])
