@@ -139,13 +139,21 @@ def render_alert(alert: BreakingAlert) -> None:
 
 
 def render_graph_stats(agent: MarketNewsAgent) -> None:
-    """Show knowledge graph statistics."""
+    """Show knowledge graph statistics with memory relevance info."""
     stats = agent.graph.stats()
     console.print(
         f"[dim]Knowledge graph: {stats['articles']} articles, "
         f"{stats['entities']} entities, {stats['events']} events, "
         f"{stats['edges']} edges[/dim]"
     )
+    avg_rel = stats.get("entities_avg_relevance")
+    if avg_rel is not None:
+        console.print(
+            f"[dim]Memory: avg relevance "
+            f"articles={stats.get('articles_avg_relevance', 0):.2f} "
+            f"entities={avg_rel:.2f} "
+            f"events={stats.get('events_avg_relevance', 0):.2f}[/dim]"
+        )
 
 
 # ------------------------------------------------------------------

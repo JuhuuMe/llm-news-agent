@@ -25,13 +25,16 @@ Every interaction follows a strict three-phase pipeline:
 2. **Deduplication** by URL across sources
 3. **Entity extraction** (LLM call per article) → entities (tickers, commodities, institutions), events (rate decisions, earnings), relationships (AFFECTS, CAUSED_BY)
 4. **Graph ingest** into SQLite — articles, entities, events stored as nodes; relationships as typed edges
-5. **Pruning** — data older than 7 days automatically removed
+5. **Memory cycle** — LSTM-style relevance management (see below) replaces blunt TTL pruning
 
 **Graph schema:**
 ```sql
-articles  (id, url, title, summary, source_name, published_at, tickers, sentiment, created_at)
-entities  (id, name, entity_type, aliases, created_at)  -- UNIQUE(name, entity_type)
-events    (id, description, event_type, timestamp, created_at)
+articles  (id, url, title, summary, source_name, published_at, tickers, sentiment,
+           created_at, relevance, last_referenced, reference_count)
+entities  (id, name, entity_type, aliases, created_at,
+           relevance, last_referenced, reference_count)  -- UNIQUE(name, entity_type)
+events    (id, description, event_type, timestamp, created_at,
+           relevance, last_referenced, reference_count)
 edges     (id, source_type, source_id, target_type, target_id, relation, direction, weight, created_at)
 ```
 
@@ -92,11 +95,13 @@ main.py
   ├── agent.py (MarketNewsAgent)
   │     ├── config.py (Settings)
   │     ├── llm.py (LLM — HF Inference API / local transformers)
-  │     ├── graph.py (GraphStore — SQLite)
+  │     ├── graph.py (GraphStore — SQLite + LSTM memory)
   │     ├── extraction.py (entity/relationship extraction)
   │     ├── qa.py (Q&A pipeline + ReAct loop)
   │     │     └── tools.py (live data lookup)
   │     └── sources/
+  │           ├── rss.py (Reuters, AP, CNBC, BBC, NPR, Guardian)
+  │           ├── reddit.py (r/economics, r/wallstreetbets, etc.)
   │           ├── newsapi.py
   │           ├── finnhub.py
   │           └── alphavantage.py
@@ -112,13 +117,60 @@ main.py
 3. **Tool calling** — no native function calling. Uses text-based ReAct pattern (`TOOL: name(args)` / `TOOL RESULT:` / `ANSWER:`).
 4. **Instruction following** — simpler prompts with explicit JSON templates work better than complex multi-step instructions.
 
+## LSTM-Style Memory Management
+
+The knowledge graph uses a memory model inspired by LSTM gates to decide what to keep
+and what to forget. Every node (article, entity, event) carries a `relevance` score
+between 0.0 and 1.0. The system runs a **memory cycle** on each ingest:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  FORGET GATE (Decay)                                     │
+│  relevance *= 0.85 per cycle — everything slowly fades   │
+├─────────────────────────────────────────────────────────┤
+│  INPUT GATE (Boost on re-reference)                      │
+│  relevance += 0.3 when article/entity seen again         │
+│  relevance += 0.1 when user queries about it             │
+├─────────────────────────────────────────────────────────┤
+│  STRUCTURAL GATE (Connectivity bonus)                    │
+│  relevance += 0.02 * log(1 + edge_count)                 │
+│  Highly-connected nodes (e.g. "Fed") resist decay        │
+├─────────────────────────────────────────────────────────┤
+│  OUTPUT GATE (Prune)                                     │
+│  Remove nodes with relevance < 0.05                      │
+│  Also removes all orphaned edges                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Hyperparameters** (in `graph.py`):
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `DECAY_FACTOR` | 0.85 | Per-cycle multiplicative decay |
+| `BOOST_ON_REFERENCE` | 0.3 | Relevance added when node is re-referenced by new articles |
+| `CONNECTIVITY_BONUS` | 0.02 | Per-edge bonus (log-scaled, diminishing returns) |
+| `PRUNE_THRESHOLD` | 0.05 | Nodes below this are removed |
+| `INITIAL_RELEVANCE` | 1.0 | New nodes start at full relevance |
+
+**What this means in practice:**
+
+- A one-off article about a minor earnings beat decays to zero in ~18 cycles and gets pruned
+- "The Fed" entity keeps getting re-referenced by new articles → stays near 1.0
+- A rate decision event persists as long as downstream articles keep linking to it
+- Old articles about resolved topics (e.g. a passed election) quietly disappear
+- When a user asks about "oil", all oil-related entities get a +0.1 boost — user interest signals relevance
+- All graph queries filter by `relevance >= 0.05` and sort by `relevance DESC` — more relevant data surfaces first
+
+**Migration:** If upgrading from the old schema, `_migrate_add_memory_columns()` adds `relevance`, `last_referenced`, and `reference_count` to all node tables. The old `prune_older_than_days()` method still exists but now delegates to `memory_cycle()`.
+
 ## Data Freshness Strategy
 
 - **News articles**: Fetched on-demand from APIs (real-time)
-- **Knowledge graph**: Persisted in SQLite, auto-pruned at 7 days
+- **Knowledge graph**: Persisted in SQLite, LSTM-style memory management (no fixed TTL)
 - **Live data tools**: Called during Q&A (real-time via API)
 - **Watch mode**: Polls every 5 minutes (configurable)
 - **Graph rebuild**: `refresh` command in Q&A mode re-fetches and re-ingests
+- **Memory cycle**: Runs automatically during each ingest — decay, boost, prune
 
 ## News Sources
 
@@ -151,3 +203,12 @@ Reddit has a minimum quality filter (score >= 10 upvotes) to cut noise.
 2. Add to `execute_tool()` dispatch
 3. Add description to `_TOOL_DESCRIPTIONS` string
 4. Tools are automatically available to the ReAct loop — no other changes needed
+
+## Roadmap / Key Differentiators
+
+These features define why this tool exists vs. a generic ChatGPT session:
+
+1. **Portfolio tracking** — User adds their stocks and interests. The agent tracks those positions across news cycles, flags relevant moves, and maintains a persistent portfolio context.
+2. **Source quality rating** — Rate and weight sources by accuracy/reliability over time. Sources that consistently provide actionable, accurate news rank higher in the analysis.
+3. **LSTM-gated trend tracking** — The memory system (above) ensures long-running trends persist while noise decays. Unlike a chat history that resets, the knowledge graph carries forward structural understanding of the market.
+4. **Automated delivery + alerts** — Daily briefing delivery (scheduled, not on-demand) plus real-time breaking alerts. The user doesn't need to ask — the tool pushes relevant information when it matters.
