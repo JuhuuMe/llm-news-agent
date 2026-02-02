@@ -108,11 +108,11 @@ class MarketNewsAgent:
         return ingested
 
     # ------------------------------------------------------------------
-    # Q&A
+    # Q&A (three-phase: data → agentic AI → report)
     # ------------------------------------------------------------------
     async def ask(self, question: str) -> str:
-        """Answer a user question using the knowledge graph."""
-        return await answer_question(question, self.llm, self.graph)
+        """Answer a user question using the knowledge graph + live data tools."""
+        return await answer_question(question, self.llm, self.graph, self.settings)
 
     # ------------------------------------------------------------------
     # Daily overview

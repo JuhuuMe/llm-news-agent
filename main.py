@@ -224,22 +224,29 @@ async def cmd_watch(agent: MarketNewsAgent) -> None:
 
 
 async def cmd_ask(agent: MarketNewsAgent) -> None:
-    """Interactive Q&A mode — fetch news, build graph, then answer questions."""
-    with console.status("[bold blue]Fetching news and building knowledge graph…"):
+    """Interactive Q&A mode using three-phase pipeline: Data → Agent → Report."""
+    # Phase 1: Data
+    console.print()
+    console.print("[bold blue]Phase 1/3 — DATA[/bold blue]  Fetching news & building knowledge graph")
+    with console.status("[blue]Fetching from all news sources…"):
         articles = await agent.fetch_all()
-        if articles:
+    console.print(f"  Fetched {len(articles)} articles from {len(agent.sources)} sources")
+    if articles:
+        with console.status("[blue]Extracting entities & relationships…"):
             ingested = await agent.ingest_to_graph(articles)
-            console.print(f"[dim]Ingested {ingested} articles into graph.[/dim]")
+        console.print(f"  Ingested {ingested} articles into knowledge graph")
     render_graph_stats(agent)
+
     console.print()
     console.print(
         Panel(
             "[bold]Ask questions about financial markets[/bold]\n"
-            "The agent uses a knowledge graph built from recent news to answer.\n"
+            "The agent uses a knowledge graph + live data tools to answer.\n"
             "Answers include consensus views and outlier perspectives.\n\n"
             'Examples: "Why did oil prices move today?"\n'
-            '          "What is the outlook for tech stocks?"\n'
-            '          "How are crypto markets reacting to Fed policy?"',
+            '          "What is the latest inflation rate and how does it affect stocks?"\n'
+            '          "What is AAPL trading at and what are analysts saying?"\n\n'
+            "Commands: [dim]refresh[/dim] (re-fetch news), [dim]stats[/dim] (graph info), [dim]quit[/dim] (exit)",
             title="Q&A Mode",
             border_style="cyan",
         )
@@ -272,9 +279,12 @@ async def _qa_loop(agent: MarketNewsAgent) -> None:
             render_graph_stats(agent)
             continue
 
-        with console.status("[bold cyan]Thinking…"):
-            answer = await agent.ask(question)
+        # Phase 2: Agentic AI (graph traversal + tool calls)
+        console.print("[bold yellow]Phase 2/3 — AGENT[/bold yellow]  Reasoning & fetching live data…")
+        answer = await agent.ask(question)
 
+        # Phase 3: Report
+        console.print("[bold green]Phase 3/3 — REPORT[/bold green]")
         console.print()
         console.print(Panel(Markdown(answer), title="Answer", border_style="cyan"))
 

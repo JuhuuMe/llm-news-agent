@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     finnhub_key: str = ""
     alphavantage_key: str = ""
 
+    # FRED API key (for economic indicators — free at https://fred.stlouisfed.org/docs/api/api_key.html)
+    fred_key: str = ""
+
     # Hugging Face
     hf_token: str = ""
     hf_model: str = "meta-llama/Llama-3.2-3B-Instruct"

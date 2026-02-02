@@ -1,36 +1,43 @@
-"""Q&A pipeline: question → entity extraction → graph traversal → context assembly → LLM answer.
+"""Q&A pipeline: question → entity extraction → graph traversal → ReAct tool loop → answer.
 
-Answers include a consensus view from the majority of sources plus any
-outlier / contrarian perspectives found in the data.
+The LLM can call data-lookup tools (stock prices, economic indicators, etc.)
+during reasoning. Answers include a consensus view plus outlier perspectives.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
 
+from news_agent.config import Settings
 from news_agent.graph import GraphStore
 from news_agent.llm import LLM, extract_json
+from news_agent.tools import ToolResult, execute_tool, get_tool_descriptions
 
 logger = logging.getLogger(__name__)
+
+# Max tool-use rounds before forcing a final answer
+_MAX_TOOL_ROUNDS = 4
 
 
 async def answer_question(
     question: str,
     llm: LLM,
     graph: GraphStore,
+    settings: Settings,
     since: datetime | None = None,
 ) -> str:
-    """End-to-end Q&A: parse question → find graph context → generate answer."""
+    """End-to-end Q&A: parse question → graph context → ReAct tool loop → answer."""
     # Step 1: Extract entities/keywords from the question
     entities = await _extract_question_entities(question, llm)
     logger.debug("Extracted question entities: %s", entities)
 
     # Step 2: Gather context from graph
-    context = _gather_context(entities, graph, since)
+    graph_context = _gather_context(entities, graph, since)
 
-    # Step 3: Generate answer with consensus + outliers
-    return await _generate_answer(question, context, llm)
+    # Step 3: ReAct loop — let LLM call tools to get live data
+    return await _react_loop(question, graph_context, llm, settings)
 
 
 async def _extract_question_entities(question: str, llm: LLM) -> list[str]:
@@ -101,7 +108,6 @@ def _gather_context(
         sections.append("RELATED ARTICLES:\n" + "\n".join(article_lines))
 
     if all_events:
-        # Deduplicate events by description
         seen_desc: set[str] = set()
         event_lines = []
         for ev in all_events:
@@ -116,7 +122,6 @@ def _gather_context(
             sections.append("RELATED EVENTS:\n" + "\n".join(event_lines[:15]))
 
     if all_related:
-        # Deduplicate
         seen_names: set[str] = set()
         related_lines = []
         for r in all_related:
@@ -130,12 +135,9 @@ def _gather_context(
             sections.append("RELATED ENTITIES:\n" + "\n".join(related_lines[:15]))
 
     if not sections:
-        # Fall back to recent articles if graph has no matches
         recent = graph.get_recent_articles(since, limit=20)
         if recent:
-            lines = [
-                f"- {a['title']} ({a['source_name']})" for a in recent
-            ]
+            lines = [f"- {a['title']} ({a['source_name']})" for a in recent]
             sections.append(
                 "No specific graph matches found. Here are recent articles:\n"
                 + "\n".join(lines)
@@ -144,31 +146,79 @@ def _gather_context(
     return "\n\n".join(sections) if sections else "No relevant data found in the knowledge graph."
 
 
-async def _generate_answer(question: str, context: str, llm: LLM) -> str:
-    """Generate a structured answer with consensus + outlier views."""
-    prompt = f"""You are a financial market analyst answering a user's question using data from multiple news sources.
+# ---------------------------------------------------------------------------
+# ReAct loop
+# ---------------------------------------------------------------------------
+
+_TOOL_CALL_RE = re.compile(r"TOOL:\s*(\w+)\(([^)]*)\)", re.IGNORECASE)
+
+
+async def _react_loop(
+    question: str,
+    graph_context: str,
+    llm: LLM,
+    settings: Settings,
+) -> str:
+    """ReAct-style loop: LLM can think, call tools, observe results, then answer."""
+    tool_descriptions = get_tool_descriptions()
+
+    prompt = f"""You are a financial market analyst with access to live data tools and a news knowledge graph.
 
 USER QUESTION: {question}
 
-AVAILABLE CONTEXT FROM KNOWLEDGE GRAPH:
-{context}
+CONTEXT FROM NEWS KNOWLEDGE GRAPH:
+{graph_context}
+
+{tool_descriptions}
 
 INSTRUCTIONS:
-1. Provide a clear, direct answer to the question.
-2. Structure your answer as:
+- First, think about what data you need to answer the question.
+- If you need live data (prices, rates, indicators), call the appropriate tool using EXACTLY this syntax: TOOL: tool_name(args)
+- You can call ONE tool at a time. After each tool call, you will see the result and can call another or give your final answer.
+- When you have enough information, write your FINAL ANSWER starting with "ANSWER:"
+- Structure the answer as:
+  **Consensus View**: What most sources agree on, citing specific data.
+  **Outlier / Contrarian Views**: Minority perspectives or contradictory data points.
+  **Key Drivers**: 2-4 main factors.
+  **Watch List**: What to monitor next.
+- Be specific — use real numbers from tool results and articles from the context.
 
-   **Consensus View**: What most sources and data points agree on. Cite specific articles or events from the context.
+Begin your analysis:"""
 
-   **Outlier / Contrarian Views**: Any minority perspectives, dissenting analyst opinions, or data points that contradict the consensus. If no outliers exist, note that consensus is strong.
+    # Accumulate conversation for the ReAct loop
+    full_prompt = prompt
+    tool_results: list[ToolResult] = []
 
-   **Key Drivers**: List the 2-4 main factors/events driving the situation.
+    for round_num in range(_MAX_TOOL_ROUNDS):
+        raw = await llm.generate(full_prompt, max_tokens=1500)
 
-   **Watch List**: What to monitor next — upcoming events or data releases that could change the picture.
+        # Check if LLM produced a final answer
+        answer_idx = raw.find("ANSWER:")
+        if answer_idx != -1:
+            return raw[answer_idx + len("ANSWER:"):].strip()
 
-3. Be specific — reference actual events and data from the context, not generic advice.
-4. If the context doesn't contain enough information to answer fully, say so clearly and explain what data is available.
-5. Keep the answer concise but complete.
+        # Check for tool call
+        match = _TOOL_CALL_RE.search(raw)
+        if not match:
+            # No tool call and no ANSWER: tag — treat the whole output as the answer
+            return raw.strip()
 
-ANSWER:"""
+        tool_name = match.group(1).lower()
+        tool_args = match.group(2).strip()
 
-    return await llm.generate(prompt, max_tokens=1500)
+        logger.debug("Tool call [round %d]: %s(%s)", round_num + 1, tool_name, tool_args)
+        result = await execute_tool(tool_name, tool_args, settings)
+        tool_results.append(result)
+
+        # Append the LLM's reasoning + tool result to the prompt
+        # Only keep text up to (and including) the tool call
+        reasoning = raw[:match.end()].strip()
+        full_prompt += f"\n{reasoning}\n\nTOOL RESULT:\n{result.output}\n\nContinue your analysis. Call another tool or write your ANSWER:"
+
+    # Max rounds reached — ask for final answer
+    full_prompt += "\n\nYou have used all available tool calls. Write your ANSWER now:"
+    raw = await llm.generate(full_prompt, max_tokens=1500)
+    answer_idx = raw.find("ANSWER:")
+    if answer_idx != -1:
+        return raw[answer_idx + len("ANSWER:"):].strip()
+    return raw.strip()
