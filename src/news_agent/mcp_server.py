@@ -1,8 +1,8 @@
 """MCP server that exposes the financial news agent as tools.
 
-The LLM client (Claude Desktop, Claude Code, etc.) becomes the reasoning layer —
-it calls these tools to fetch news, query the knowledge graph, and look up live
-market data.  No internal ReAct loop is needed; the client drives tool use.
+Provides both raw data tools (fetch_news, stock_price, etc.) and LLM-powered
+analysis tools (news_overview, ask_news, check_breaking) that use a local model
+(e.g. Qwen 3.5 8B via vLLM) to produce structured market analysis.
 
 Run with:
     news-agent-mcp                     # stdio transport (default)
@@ -18,10 +18,13 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+from news_agent.agent import MarketNewsAgent
 from news_agent.config import Settings, load_settings
 from news_agent.extraction import extract_from_article
 from news_agent.graph import GraphStore
 from news_agent.llm import LLM
+from news_agent.models import UserInterests
+from news_agent.qa import answer_question
 from news_agent.sources.alphavantage import AlphaVantageSource
 from news_agent.sources.base import NewsSource
 from news_agent.sources.finnhub import FinnhubSource
@@ -417,6 +420,163 @@ async def company_profile(ticker: str) -> str:
     """
     result = await execute_tool("company_profile", ticker, _get_settings())
     return result.output
+
+
+# ---------------------------------------------------------------------------
+# LLM-powered analysis tools (Qwen inside the MCP server)
+# ---------------------------------------------------------------------------
+
+
+def _build_agent(
+    topics: str, tickers: str,
+) -> MarketNewsAgent:
+    """Build a MarketNewsAgent with the given interests."""
+    settings = _get_settings()
+    topic_list = [t.strip() for t in topics.split(",") if t.strip()]
+    ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    interests = UserInterests(
+        topics=topic_list or ["stock market"],
+        tickers=ticker_list,
+        regions=[],
+    )
+    return MarketNewsAgent(settings, interests)
+
+
+@mcp.tool()
+async def news_overview(
+    topics: str = "stock market, inflation, oil",
+    tickers: str = "",
+) -> str:
+    """Get a structured daily market overview analyzed by the local LLM.
+
+    Fetches news, then uses the local LLM (e.g. Qwen 3.5 8B) to cluster
+    articles into topics, assess market impact, and assign urgency levels.
+    Returns a structured digest with market mood, topic clusters,
+    affected assets, and directional calls.
+
+    Requires LLM_BACKEND to be configured (vllm, api, or local).
+
+    Args:
+        topics: Comma-separated topics (e.g. "oil, Fed, tech earnings")
+        tickers: Comma-separated stock tickers (e.g. "AAPL,TSLA")
+    """
+    settings = _get_settings()
+    if not settings.hf_token and settings.llm_backend == "api":
+        return (
+            "HF_TOKEN not set. Set HF_TOKEN in .env, "
+            "or use LLM_BACKEND=vllm / LLM_BACKEND=local."
+        )
+
+    agent = _build_agent(topics, tickers)
+    try:
+        overview = await agent.daily_overview()
+    except Exception as exc:
+        return f"Overview generation failed: {exc}"
+
+    lines = [f"MARKET MOOD: {overview.market_mood}\n"]
+    for i, d in enumerate(overview.digests, 1):
+        lines.append(f"[{i}] {d.headline} [{d.urgency.value.upper()}]")
+        lines.append(f"    {d.summary}")
+        if d.impact.affected_assets:
+            assets = ", ".join(d.impact.affected_assets)
+            lines.append(
+                f"    Impact: {assets} → {d.impact.direction} "
+                f"({d.impact.confidence})"
+            )
+            if d.impact.reasoning:
+                lines.append(f"    Reasoning: {d.impact.reasoning}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def ask_news(
+    question: str,
+    topics: str = "stock market, inflation",
+    tickers: str = "",
+) -> str:
+    """Ask a question and get an answer using the knowledge graph + local LLM.
+
+    Uses the full Q&A pipeline: extracts entities from your question,
+    traverses the knowledge graph for context, then runs a ReAct tool
+    loop (up to 4 rounds of live data lookups) using the local LLM
+    (e.g. Qwen 3.5 8B) to produce a structured answer with consensus
+    view, outlier perspectives, key drivers, and a watch list.
+
+    Requires the knowledge graph to be populated (run ingest_news first)
+    and an LLM backend to be configured.
+
+    Args:
+        question: Your market/financial question
+        topics: Context topics for graph search
+        tickers: Context tickers for graph search
+    """
+    settings = _get_settings()
+    if not settings.hf_token and settings.llm_backend == "api":
+        return (
+            "HF_TOKEN not set. Set HF_TOKEN in .env, "
+            "or use LLM_BACKEND=vllm / LLM_BACKEND=local."
+        )
+
+    llm = _get_llm()
+    graph = _get_graph()
+
+    try:
+        return await answer_question(question, llm, graph, settings)
+    except Exception as exc:
+        return f"Q&A failed: {exc}"
+
+
+@mcp.tool()
+async def check_breaking(
+    topics: str = "stock market, inflation, oil",
+    tickers: str = "",
+) -> str:
+    """Check for breaking / urgent market-moving news using the local LLM.
+
+    Fetches latest articles and uses the local LLM (e.g. Qwen 3.5 8B)
+    to identify truly urgent events: unexpected rate decisions, major
+    earnings surprises, geopolitical shocks, flash crashes, M&A, etc.
+
+    Returns only genuinely market-moving alerts, not routine news.
+    Requires an LLM backend to be configured.
+
+    Args:
+        topics: Comma-separated topics to monitor
+        tickers: Comma-separated stock tickers to monitor
+    """
+    settings = _get_settings()
+    if not settings.hf_token and settings.llm_backend == "api":
+        return (
+            "HF_TOKEN not set. Set HF_TOKEN in .env, "
+            "or use LLM_BACKEND=vllm / LLM_BACKEND=local."
+        )
+
+    agent = _build_agent(topics, tickers)
+    try:
+        alerts = await agent.check_breaking()
+    except Exception as exc:
+        return f"Breaking news check failed: {exc}"
+
+    if not alerts:
+        return "No breaking news detected. Markets appear calm."
+
+    lines = []
+    for i, alert in enumerate(alerts, 1):
+        d = alert.digest
+        lines.append(f"[BREAKING {i}] {d.headline}")
+        lines.append(f"  {d.summary}")
+        lines.append(f"  Reason: {alert.reason}")
+        if d.impact.affected_assets:
+            assets = ", ".join(d.impact.affected_assets)
+            lines.append(
+                f"  Impact: {assets} → {d.impact.direction} "
+                f"({d.impact.confidence})"
+            )
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
