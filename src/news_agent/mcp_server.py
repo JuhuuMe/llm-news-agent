@@ -91,29 +91,84 @@ def _get_llm() -> LLM:
 
 
 async def _prewarm() -> None:
-    """Prewarm all lazy singletons + ping vLLM so the model is ready."""
+    """Prewarm: ping vLLM, fetch news, build knowledge graph."""
     logger.info("Prewarming MCP server…")
 
     # Init settings, graph, sources
     settings = _get_settings()
-    _get_graph()
-    _get_sources()
+    graph = _get_graph()
+    sources = _get_sources()
 
-    # Ping vLLM with a tiny request to trigger model loading
+    # 1. Ping vLLM to trigger model loading
+    llm_ready = False
     if settings.llm_backend == "vllm":
         llm = _get_llm()
         try:
             await llm.generate("Say OK.", max_tokens=4)
             logger.info("vLLM ping OK — model is warm.")
+            llm_ready = True
         except Exception as exc:
-            logger.warning("vLLM ping failed (will retry on first tool call): %s", exc)
+            logger.warning("vLLM ping failed: %s", exc)
     elif settings.llm_backend == "api" and settings.hf_token:
         llm = _get_llm()
         try:
             await llm.generate("Say OK.", max_tokens=4)
             logger.info("HF API ping OK.")
+            llm_ready = True
         except Exception as exc:
             logger.warning("HF API ping failed: %s", exc)
+    elif settings.llm_backend == "local":
+        llm_ready = True
+
+    # 2. Fetch news and build knowledge graph
+    if sources:
+        logger.info("Fetching news for initial knowledge graph…")
+        query = "stock market economy inflation"
+        tasks = [source.fetch(query) for source in sources]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        articles = []
+        seen_urls: set[str] = set()
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning("Source fetch failed during prewarm: %s", result)
+                continue
+            for article in result:
+                url = article.url.strip()
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    articles.append(article)
+
+        articles.sort(
+            key=lambda a: a.published_at or datetime.min, reverse=True,
+        )
+        logger.info("Fetched %d articles from %d sources.", len(articles), len(sources))
+
+        # 3. Run entity extraction + graph ingest (requires LLM)
+        if llm_ready and articles:
+            llm = _get_llm()
+            graph.memory_cycle()
+            ingested = 0
+            for article in articles:
+                try:
+                    ext = await extract_from_article(llm, article)
+                    graph.ingest_extraction(
+                        article, ext.entities, ext.events, ext.relationships,
+                    )
+                    ingested += 1
+                except Exception as exc:
+                    logger.warning("Ingest failed: %s", exc)
+            stats = graph.stats()
+            logger.info(
+                "Knowledge graph ready: %d articles ingested, "
+                "%d entities, %d events, %d edges.",
+                ingested, stats["entities"], stats["events"], stats["edges"],
+            )
+        elif not llm_ready:
+            logger.warning(
+                "LLM not available — skipping entity extraction. "
+                "Graph will be built on first ingest_news call.",
+            )
 
     logger.info("Prewarm complete.")
 
