@@ -19,7 +19,11 @@ class Settings(BaseSettings):
     # Hugging Face
     hf_token: str = ""
     hf_model: str = "meta-llama/Llama-3.2-3B-Instruct"
-    llm_backend: str = "api"  # "api" or "local"
+    llm_backend: str = "api"  # "api", "local", or "vllm"
+
+    # vLLM settings (when llm_backend="vllm")
+    vllm_base_url: str = "http://localhost:8000/v1"
+    vllm_model: str = "Qwen/Qwen3.5-8B"
 
     # Free sources (no key required — enabled by default)
     enable_rss: bool = True

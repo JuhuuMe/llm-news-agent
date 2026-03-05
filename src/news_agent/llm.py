@@ -21,6 +21,8 @@ class LLM:
     async def generate(self, prompt: str, max_tokens: int = 2048) -> str:
         if self._settings.llm_backend == "local":
             return self._generate_local(prompt, max_tokens)
+        if self._settings.llm_backend == "vllm":
+            return await self._generate_vllm(prompt, max_tokens)
         return await self._generate_api(prompt, max_tokens)
 
     # ------------------------------------------------------------------
@@ -44,6 +46,32 @@ class LLM:
             return_full_text=False,
         )
         return response
+
+    # ------------------------------------------------------------------
+    # vLLM (OpenAI-compatible server, e.g. Qwen3.5-8B)
+    # ------------------------------------------------------------------
+    async def _generate_vllm(self, prompt: str, max_tokens: int) -> str:
+        import httpx
+
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                base_url=self._settings.vllm_base_url,
+                timeout=120.0,
+            )
+
+        client: httpx.AsyncClient = self._client  # type: ignore[assignment]
+        response = await client.post(
+            "/chat/completions",
+            json={
+                "model": self._settings.vllm_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": 0.3,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"]
 
     # ------------------------------------------------------------------
     # Local transformers (requires GPU + pip install .[local])

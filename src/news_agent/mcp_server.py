@@ -194,7 +194,7 @@ async def ingest_news(
     if not settings.hf_token and settings.llm_backend == "api":
         return (
             "HF_TOKEN not set — entity extraction requires an LLM backend. "
-            "Set HF_TOKEN in .env or use LLM_BACKEND=local."
+            "Set HF_TOKEN in .env, or use LLM_BACKEND=vllm / LLM_BACKEND=local."
         )
 
     llm = _get_llm()
