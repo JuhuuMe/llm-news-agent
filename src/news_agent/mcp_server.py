@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -88,6 +89,46 @@ def _get_llm() -> LLM:
 # MCP server
 # ---------------------------------------------------------------------------
 
+
+async def _prewarm() -> None:
+    """Prewarm all lazy singletons + ping vLLM so the model is ready."""
+    logger.info("Prewarming MCP server…")
+
+    # Init settings, graph, sources
+    settings = _get_settings()
+    _get_graph()
+    _get_sources()
+
+    # Ping vLLM with a tiny request to trigger model loading
+    if settings.llm_backend == "vllm":
+        llm = _get_llm()
+        try:
+            await llm.generate("Say OK.", max_tokens=4)
+            logger.info("vLLM ping OK — model is warm.")
+        except Exception as exc:
+            logger.warning("vLLM ping failed (will retry on first tool call): %s", exc)
+    elif settings.llm_backend == "api" and settings.hf_token:
+        llm = _get_llm()
+        try:
+            await llm.generate("Say OK.", max_tokens=4)
+            logger.info("HF API ping OK.")
+        except Exception as exc:
+            logger.warning("HF API ping failed: %s", exc)
+
+    logger.info("Prewarm complete.")
+
+
+@asynccontextmanager
+async def server_lifespan(server):
+    """Run prewarm on startup, cleanup on shutdown."""
+    await _prewarm()
+    try:
+        yield
+    finally:
+        if _graph is not None:
+            _graph.close()
+
+
 mcp = FastMCP(
     "Financial News Agent",
     instructions=(
@@ -96,6 +137,7 @@ mcp = FastMCP(
         "search_graph to query the knowledge graph, and the individual market "
         "data tools (stock_price, crypto_price, etc.) for live quotes."
     ),
+    lifespan=server_lifespan,
 )
 
 
