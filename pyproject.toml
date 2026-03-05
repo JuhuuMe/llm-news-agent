@@ -10,6 +10,7 @@ dependencies = [
     "pydantic-settings>=2.0",
     "python-dotenv>=1.0",
     "rich>=13.0",
+    "mcp>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +27,7 @@ dev = [
 
 [project.scripts]
 news-agent = "news_agent.cli:main"
+news-agent-mcp = "news_agent.mcp_server:main"
 
 [tool.ruff]
 target-version = "py311"
